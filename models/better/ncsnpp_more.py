@@ -252,7 +252,6 @@ class NCSNpp(nn.Module):
     # timestep/noise_level embedding; only for continuous training
     modules = self.all_modules
     m_idx = 0
-
     if cond is not None:
       x = torch.cat([x, cond], dim=1) # B, (num_frames+num_frames_cond)*C, H, W
 
@@ -409,6 +408,7 @@ class SPADE_NCSNpp(nn.Module):
     self.channels = channels = config.data.channels
     self.num_frames = num_frames = config.data.num_frames
     self.num_frames_cond = num_frames_cond = config.data.num_frames_cond + getattr(config.data, "num_frames_future", 0)
+    self.action_dimension = getattr(config.data, "action_dimension", 0)
     self.n_frames = num_frames
 
     self.nf = nf = config.model.ngf*self.num_frames if self.is3d else config.model.ngf # We must prevent problems by multiplying by num_frames
@@ -505,7 +505,7 @@ class SPADE_NCSNpp(nn.Module):
                                       pseudo3d=self.pseudo3d,
                                       n_frames=self.num_frames,
                                       num_frames_cond=num_frames_cond,
-                                      cond_ch=num_frames_cond*channels,
+                                      cond_ch=num_frames_cond*channels + self.action_dimension*(self.num_frames+num_frames_cond-1),
                                       spade_dim=spade_dim,
                                       act3d=True) # Activation here as per https://arxiv.org/abs/1809.04096
 
@@ -522,7 +522,7 @@ class SPADE_NCSNpp(nn.Module):
                                       pseudo3d=self.pseudo3d,
                                       n_frames=self.num_frames,
                                       num_frames_cond=num_frames_cond,
-                                      cond_ch=num_frames_cond*channels,
+                                      cond_ch=num_frames_cond*channels + self.action_dimension*(self.num_frames+num_frames_cond-1),
                                       spade_dim=spade_dim,
                                       act3d=True) # Activation here as per https://arxiv.org/abs/1809.04096
 
@@ -582,7 +582,7 @@ class SPADE_NCSNpp(nn.Module):
     assert not hs_c
 
     modules.append(layerspp.get_act_norm(act=act, act_emb=act, norm='spade', ch=in_ch, is3d=self.is3d, n_frames=self.num_frames, num_frames_cond=num_frames_cond,
-                                         cond_ch=num_frames_cond*channels, spade_dim=spade_dim, cond_conv=conv3x3, cond_conv1=conv1x1_cond))
+                                         cond_ch=num_frames_cond*channels + self.action_dimension*(self.num_frames+num_frames_cond-1), spade_dim=spade_dim, cond_conv=conv3x3, cond_conv1=conv1x1_cond))
     modules.append(conv3x3(in_ch, channels*self.num_frames, init_scale=init_scale))
 
     self.all_modules = nn.ModuleList(modules)

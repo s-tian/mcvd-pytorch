@@ -100,8 +100,16 @@ class RunningAverageMeter(object):
             if step is not None:
                 self.steps.append(step)
 
+def tile_actions_into_image(actions, image_shape):
+    # take tensor of shape [B, T, a_dim] and tile into shape [B, a_dim*T, height, width]
+    height, width = image_shape
+    actions = actions[:, :-1]  # don't use last action, as we should have one fewer action than frame
+    actions = actions.reshape(actions.shape[0], -1)
+    actions = actions[..., None, None]
+    actions = actions.repeat(1, 1, height, width)
+    return actions
 
-def conditioning_fn(config, X, num_frames_pred=0, prob_mask_cond=0.0, prob_mask_future=0.0, conditional=True):
+def conditioning_fn(config, X, num_frames_pred=0, prob_mask_cond=0.0, prob_mask_future=0.0, conditional=True, actions=None):
     imsize = config.data.image_size
     if not conditional:
         return X.reshape(len(X), -1, imsize, imsize), None, None
@@ -143,6 +151,10 @@ def conditioning_fn(config, X, num_frames_pred=0, prob_mask_cond=0.0, prob_mask_
             #     future_mask = None
 
         cond_frames = torch.cat([cond_frames, future_frames], dim=1)
+
+    if actions is not None:
+        actions_tiled = tile_actions_into_image(actions, (imsize, imsize))
+        cond_frames = torch.cat([cond_frames, actions_tiled], dim=1)
 
     return pred_frames, cond_frames, cond_mask   # , future_mask
 
@@ -249,6 +261,40 @@ class NCSNRunner():
         if self.config.data.dataset.upper() == 'FFHQ':
             dataloader = FFHQ_TFRecordsDataLoader([self.args.data_path], self.config.training.batch_size, self.config.data.image_size)
             test_loader = FFHQ_TFRecordsDataLoader([self.args.data_path], self.config.training.batch_size, self.config.data.image_size)
+            test_iter = iter(test_loader)
+        elif self.config.data.dataset.upper() == "PERCEPTUAL_METRICS":
+            from fitvid.data.robomimic_data import load_dataset_robomimic_torch
+            num_frames_to_sample = self.config.data.num_frames_cond + getattr(self.config.data, "num_frames_future", 0) + self.config.data.num_frames
+            dataloader = load_dataset_robomimic_torch(
+                self.config.data.dataset_files,
+                self.config.training.batch_size,
+                num_frames_to_sample,
+                [self.config.data.image_size]*2,
+                "train",
+                depth=False,
+                normal=False,
+                view=self.config.data.camera_view,
+                cache_mode=self.config.data.cache_mode,
+                seg=False,
+                only_depth=False,
+                augmentation=False,
+                postprocess_fn=lambda x: (x, None) # the dataloader format expects an outputted pair X, y
+            )
+            test_loader = load_dataset_robomimic_torch(
+                self.config.data.dataset_files,
+                self.config.training.batch_size,
+                num_frames_to_sample,
+                [self.config.data.image_size]*2,
+                "valid",
+                depth=False,
+                normal=False,
+                view=self.config.data.camera_view,
+                cache_mode=self.config.data.cache_mode,
+                seg=False,
+                only_depth=False,
+                augmentation=False,
+                postprocess_fn=lambda x: (x, None) # the dataloader format expects an outputted pair X, y
+            )
             test_iter = iter(test_loader)
         else:
             dataset, test_dataset = get_dataset(self.args.data_path, self.config, video_frames_pred=self.config.data.num_frames, start_at=self.args.start_at)
@@ -376,14 +422,20 @@ class NCSNRunner():
                 scorenet.train()
                 step += 1
 
+                actions = None
+                if self.config.data.dataset.upper() == "PERCEPTUAL_METRICS":
+                    if getattr(self.config.data, "action_dimension", 0) > 0:
+                        actions = X["actions"]
+                        actions = actions.to(self.config.device)
+                    X = X["video"]
                 # Data
                 X = X.to(self.config.device)
                 X = data_transform(self.config, X)
                 X, cond, cond_mask = conditioning_fn(self.config, X, num_frames_pred=self.config.data.num_frames,
                                                      prob_mask_cond=getattr(self.config.data, 'prob_mask_cond', 0.0),
                                                      prob_mask_future=getattr(self.config.data, 'prob_mask_future', 0.0),
-                                                     conditional=conditional)
-
+                                                     conditional=conditional,
+                                                     actions=actions)
                 # Loss
                 itr_start = time.time()
                 loss = anneal_dsm_score_estimation(scorenet, X, labels=None, cond=cond, cond_mask=cond_mask,
@@ -457,13 +509,21 @@ class NCSNRunner():
                         test_iter = iter(test_loader)
                         test_X, test_y = next(test_iter)
 
+                    actions = None
+                    if self.config.data.dataset.upper() == "PERCEPTUAL_METRICS":
+                        if getattr(self.config.data, "action_dimension", 0) > 0:
+                            actions = test_X["actions"]
+                            actions = actions.to(self.config.device)
+                        test_X = test_X["video"]
+
                     test_X = test_X.to(self.config.device)
                     test_X = data_transform(self.config, test_X)
 
                     test_X, test_cond, test_cond_mask = conditioning_fn(self.config, test_X, num_frames_pred=self.config.data.num_frames,
                                                                         prob_mask_cond=getattr(self.config.data, 'prob_mask_cond', 0.0),
                                                                         prob_mask_future=getattr(self.config.data, 'prob_mask_future', 0.0),
-                                                                        conditional=conditional)
+                                                                        conditional=conditional,
+                                                                        actions=actions)
 
                     with torch.no_grad():
                         test_dsm_loss = anneal_dsm_score_estimation(test_scorenet, test_X, labels=None, cond=test_cond, cond_mask=test_cond_mask,
@@ -598,12 +658,21 @@ class NCSNRunner():
                         except StopIteration:
                             test_iter = iter(test_loader)
                             test_X, test_y = next(test_iter)
+
+                        actions = None
+                        if self.config.data.dataset.upper() == "PERCEPTUAL_METRICS":
+                            if getattr(self.config.data, "action_dimension", 0) > 0:
+                                actions = test_X["actions"][:len(init_samples)]
+                                actions = actions.to(self.config.device)
+                            test_X = test_X["video"]
+
                         test_X = test_X[:len(init_samples)].to(self.config.device)
                         test_X = data_transform(self.config, test_X)
                         test_X, test_cond, test_cond_mask = conditioning_fn(self.config, test_X, num_frames_pred=self.config.data.num_frames,
                                                                             prob_mask_cond=getattr(self.config.data, 'prob_mask_cond', 0.0),
                                                                             prob_mask_future=getattr(self.config.data, 'prob_mask_future', 0.0),
-                                                                            conditional=conditional)
+                                                                            conditional=conditional,
+                                                                            actions=actions)
 
                     all_samples = sampler(init_samples, test_scorenet, cond=test_cond, cond_mask=test_cond_mask,
                                           n_steps_each=self.config.sampling.n_steps_each,
@@ -1408,11 +1477,36 @@ class NCSNRunner():
         elif self.condp > 0.0 and self.futrf > 0 and self.futrp > 0.0 and self.prob_mask_sync:     # (1) Interp + (3) Gen
             num_frames_pred = max(self.config.data.num_frames, self.config.sampling.num_frames_pred)
 
-        dataset_train, dataset_test = get_dataset(self.args.data_path, self.config, video_frames_pred=num_frames_pred, start_at=self.args.start_at)
-        dataset = dataset_train if getattr(self.config.sampling, "train", False) else dataset_test
-        dataloader = DataLoader(dataset, batch_size=self.config.sampling.batch_size//preds_per_test, shuffle=True,
-                                num_workers=self.config.data.num_workers, drop_last=False, collate_fn=my_collate)
-        data_iter = iter(dataloader)
+        if self.config.data.dataset.upper() == "PERCEPTUAL_METRICS":
+            from fitvid.data.robomimic_data import load_dataset_robomimic_torch
+            num_frames_to_sample = self.config.sampling.num_frames_pred + self.config.data.num_frames_cond
+
+            def postprocess(batch):
+                batch = {k: v.repeat_interleave(preds_per_test, dim=0) if v is not None else None for k, v in batch.items()}
+                return batch, torch.zeros(len(batch["video"]))
+
+            dataloader = load_dataset_robomimic_torch(
+                self.config.data.dataset_files,
+                self.config.sampling.batch_size//preds_per_test,
+                num_frames_to_sample,
+                [self.config.data.image_size]*2,
+                "train" if getattr(self.config.sampling, "train", False) else "valid",
+                depth=False,
+                normal=False,
+                view=self.config.data.camera_view,
+                cache_mode="low_dim",
+                seg=False,
+                only_depth=False,
+                augmentation=False,
+                postprocess_fn=postprocess  # the dataloader format expects an outputted pair X, y
+            )
+            data_iter = iter(dataloader) # this seems unused
+        else:
+            dataset_train, dataset_test = get_dataset(self.args.data_path, self.config, video_frames_pred=num_frames_pred, start_at=self.args.start_at)
+            dataset = dataset_train if getattr(self.config.sampling, "train", False) else dataset_test
+            dataloader = DataLoader(dataset, batch_size=self.config.sampling.batch_size//preds_per_test, shuffle=True,
+                                    num_workers=self.config.data.num_workers, drop_last=False, collate_fn=my_collate)
+            data_iter = iter(dataloader)
 
         if self.config.sampling.data_init:
             dataloader2 = DataLoader(dataset, batch_size=self.config.sampling.batch_size, shuffle=True,
@@ -1439,6 +1533,12 @@ class NCSNRunner():
             if i >= max_data_iter: # stop early
                 break
 
+            actions = None
+            if self.config.data.dataset.upper() == "PERCEPTUAL_METRICS":
+                if getattr(self.config.data, "action_dimension", 0) > 0:
+                    actions = real_["actions"].to(real_["video"])
+                real_ = real_["video"]
+
             real_ = data_transform(self.config, real_)
 
             # (1) Conditional Video Predition/Interpolation : Calc MSE,etc. and FVD on fully cond model i.e. prob_mask_cond=0.0
@@ -1456,7 +1556,7 @@ class NCSNRunner():
                 logging.info(f"INTERPOLATING {num_frames_pred} frames, using a {self.config.data.num_frames} frame model conditioned on {self.config.data.num_frames_cond} cond + {future} future frames, subsample={getattr(self.config.sampling, 'subsample', None)}, preds_per_test={preds_per_test}")
 
             real, cond, cond_mask = conditioning_fn(self.config, real_, num_frames_pred=num_frames_pred,
-                                                    prob_mask_cond=0.0, prob_mask_future=0.0, conditional=conditional)
+                                                    prob_mask_cond=0.0, prob_mask_future=0.0, conditional=conditional, actions=actions)
             real = inverse_data_transform(self.config, real)
             cond_original = inverse_data_transform(self.config, cond.clone())
             cond = cond.to(self.config.device)
@@ -1497,7 +1597,7 @@ class NCSNRunner():
                     init_samples = alpha.sqrt() * real_init1 + (1 - alpha).sqrt() * z
             else:
                 init_samples = z
-
+            
             if getattr(self.config.sampling, 'one_frame_at_a_time', False):
                 n_iter_frames = num_frames_pred
             else:

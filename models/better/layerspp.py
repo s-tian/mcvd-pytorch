@@ -97,7 +97,6 @@ class SPADE(nn.Module):
 
         return out
 
-
 class MySPADE(nn.Module):
     # def __init__(self, config_text, norm_nc, label_nc):
     def __init__(self, norm_nc, label_nc, param_free_norm_type='group', act=nn.ReLU(), conv=conv3x3,
@@ -153,7 +152,6 @@ class MySPADE(nn.Module):
         # Part 1. generate parameter-free normalized activations
         B, H, W = x.shape[0], x.shape[-2], x.shape[-1]
         normalized = self.param_free_norm(x).reshape(B, -1, H, W)
-
         if self.is3d:
           # Use 1x1 Conv3D to convert segmap from num_frames_cond (Nc) to num_frames (N) :
           # B,CNc,H,W -> B,C,Nc,H,W -> B,Nc,C,H,W ---1x1Conv3D--> B,N,C,H,W -> B,C,N,H,W -> B,CN,H,W

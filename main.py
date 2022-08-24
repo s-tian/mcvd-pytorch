@@ -162,7 +162,7 @@ def parse_args_and_config():
             # Code
             code_path = os.path.join(args.exp, 'code')
             os.makedirs(code_path, exist_ok=True)
-            copy_scripts(os.path.dirname(os.path.abspath(__file__)), code_path)
+            # copy_scripts(os.path.dirname(os.path.abspath(__file__)), code_path)
 
         # new_config.tb_logger = tb.SummaryWriter(log_dir=tb_path)
         # setup logger

@@ -103,7 +103,7 @@ class RunningAverageMeter(object):
 def tile_actions_into_image(actions, image_shape):
     # take tensor of shape [B, T, a_dim] and tile into shape [B, a_dim*T, height, width]
     height, width = image_shape
-    actions = actions[:, :-1]  # don't use last action, as we should have one fewer action than frame
+    # actions = actions[:, :-1]  # don't use last action, as we should have one fewer action than frame
     actions = actions.reshape(actions.shape[0], -1)
     actions = actions[..., None, None]
     actions = actions.repeat(1, 1, height, width)
@@ -153,7 +153,7 @@ def conditioning_fn(config, X, num_frames_pred=0, prob_mask_cond=0.0, prob_mask_
         cond_frames = torch.cat([cond_frames, future_frames], dim=1)
 
     if actions is not None:
-        actions_tiled = tile_actions_into_image(actions, (imsize, imsize))
+        actions_tiled = tile_actions_into_image(actions[:, :cond+train-1], (imsize, imsize))
         cond_frames = torch.cat([cond_frames, actions_tiled], dim=1)
 
     return pred_frames, cond_frames, cond_mask   # , future_mask
@@ -1556,7 +1556,8 @@ class NCSNRunner():
                 logging.info(f"INTERPOLATING {num_frames_pred} frames, using a {self.config.data.num_frames} frame model conditioned on {self.config.data.num_frames_cond} cond + {future} future frames, subsample={getattr(self.config.sampling, 'subsample', None)}, preds_per_test={preds_per_test}")
 
             real, cond, cond_mask = conditioning_fn(self.config, real_, num_frames_pred=num_frames_pred,
-                                                    prob_mask_cond=0.0, prob_mask_future=0.0, conditional=conditional, actions=actions)
+                                                    prob_mask_cond=0.0, prob_mask_future=0.0, conditional=conditional,
+                                                    actions=actions[:, :self.config.data.num_frames_cond+self.config.data.num_frames-1])
             real = inverse_data_transform(self.config, real)
             cond_original = inverse_data_transform(self.config, cond.clone())
             cond = cond.to(self.config.device)
@@ -1608,7 +1609,6 @@ class NCSNRunner():
             for i_frame in tqdm(range(n_iter_frames), desc="Generating video frames"):
 
                 mynet = scorenet
-
                 # Generate samples
                 gen_samples = sampler(init_samples if i_frame==0 or getattr(self.config.sampling, 'init_prev_t', -1) <= 0 else gen_samples,
                                       mynet, cond=cond, cond_mask=cond_mask,
@@ -1634,9 +1634,18 @@ class NCSNRunner():
                 elif getattr(self.config.sampling, 'one_frame_at_a_time', False):
                     cond = torch.cat([cond[:, self.config.data.channels:], gen_samples[:, :self.config.data.channels]], dim=1)
                 else:
-                    cond = torch.cat([cond[:, self.config.data.channels*self.config.data.num_frames:],
+                    num_frames_from_prev_cond = max(0, self.config.data.num_frames_cond-self.config.data.num_frames)
+                    from_prev_cond = cond[:, self.config.data.channels*self.config.data.num_frames:self.config.data.channels*(self.config.data.num_frames + num_frames_from_prev_cond)]
+
+                    cond = torch.cat([from_prev_cond,
                                       gen_samples[:, self.config.data.channels*max(0, self.config.data.num_frames - self.config.data.num_frames_cond):]
                                      ], dim=1)
+                    if actions is not None and self.config.data.action_dimension > 0:
+                        start_action_idx = (i_frame+1) * self.config.data.num_frames
+                        imsize = self.config.data.image_size
+                        actions_tiled = tile_actions_into_image(actions[:, start_action_idx:start_action_idx+self.config.data.num_frames + self.config.data.num_frames_cond-1], (imsize, imsize))
+                        actions_tiled = actions_tiled.to(cond)
+                        cond = torch.cat([cond, actions_tiled], dim=1)
 
                 # resample new random init
                 if self.version == "SMLD":
